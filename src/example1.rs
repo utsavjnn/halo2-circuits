@@ -15,6 +15,7 @@ struct ACell<F: FieldExt>(AssignedCell<F, F>);
 struct FiboConfig {
     pub advice: [Column<Advice>; 3],
     pub select: Selector,
+    instance: Column<Instance>
 }
 
 struct FiboChip<F: FieldExt> {
@@ -33,7 +34,7 @@ impl<F: FieldExt> FiboChip<F> {
     }
 
     // Going to generate a circuit and define a custom gate here
-    fn configure(meta: &mut ConstraintSystem<F>) -> FiboConfig {
+    fn configure(meta: &mut ConstraintSystem<F>, instance: Column<Instance>) -> FiboConfig {
         let col_a = meta.advice_column();
         let col_b = meta.advice_column();
         let col_c = meta.advice_column();
@@ -43,6 +44,8 @@ impl<F: FieldExt> FiboChip<F> {
         meta.enable_equality(col_a);
         meta.enable_equality(col_b);
         meta.enable_equality(col_c);
+        meta.enable_equality(instance);
+
 
         meta.create_gate("add", |meta|{
             // local gate constraint
@@ -59,7 +62,8 @@ impl<F: FieldExt> FiboChip<F> {
 
         FiboConfig { 
             advice: [col_a, col_b, col_c],
-            select: selector
+            select: selector,
+            instance
         }
     }
 
@@ -69,6 +73,7 @@ impl<F: FieldExt> FiboChip<F> {
 
             self.config.select.enable(&mut region, 0)?; // kind of region selector
 
+            // can also use assign_advice_from_instance
             let a_cell = region.assign_advice(
                 || "a",
                  self.config.advice[0], // column selector
@@ -108,6 +113,14 @@ impl<F: FieldExt> FiboChip<F> {
             Ok(c_cell)
         })
     }
+
+    fn expose_public(&self, 
+        mut layouter: impl Layouter<F>, 
+        cell: &ACell<F>,
+        row: usize
+    ) -> Result<(), Error>{
+        layouter.constrain_instance(cell.0.cell(), self.config.instance, row)
+    }
 }
 
 #[derive(Default)]
@@ -128,7 +141,8 @@ impl<F: FieldExt> Circuit<F> for FibonacciCircuit<F> {
 
     // Has the arrangement of columns. Called only during keygen, and will just call chip config most of the time
     fn configure(meta: &mut ConstraintSystem<F>) -> Self::Config { //just tells about local gate constraints
-        FiboChip::configure(meta)
+        let instance = meta.instance_column();
+        FiboChip::configure(meta, instance)
     }
 
 
@@ -138,9 +152,12 @@ impl<F: FieldExt> Circuit<F> for FibonacciCircuit<F> {
     fn synthesize(&self, config: Self::Config, mut layouter: impl Layouter<F>) -> Result<(), Error> {
         let chip = FiboChip::construct(config);
         
-        let (_, mut prev_b, mut prev_c) = chip.assign_first_row(
+        let (prev_a, mut prev_b, mut prev_c) = chip.assign_first_row(
             layouter.namespace(|| "first row"), self.a, self.b)?;
         
+        chip.expose_public(layouter.namespace(||"priv a"), &prev_a, 0)?;
+        chip.expose_public(layouter.namespace(||"priv b"), &prev_b, 1)?;
+
         // we have to prove f(9) = z
         for _ in 3..10 {
             // assign row
@@ -151,6 +168,8 @@ impl<F: FieldExt> Circuit<F> for FibonacciCircuit<F> {
             prev_c = c_cell;
         }
         
+        chip.expose_public(layouter.namespace(||"output"), &prev_c, 2)?;
+
         Ok(())
     }
 }
@@ -167,7 +186,9 @@ fn main() {
         b: Some(b),
     };
 
+    let pub_input = vec![a, b, out];
+
     // istance is public inputs
-    let prover = MockProver::run(k, &circuit, vec![]).unwrap();
+    let prover = MockProver::run(k, &circuit, vec![pub_input.clone()]).unwrap();
     prover.assert_satisfied();
 }
